@@ -3,6 +3,7 @@ package mapreduce
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 )
 
 // Schedules map operations on remote workers. This will run until InputFilePathChan
@@ -17,29 +18,37 @@ func (master *Master) schedule(task *Task, proc string, filePathChan chan string
 		filePath  string
 		worker    *RemoteWorker
 		operation *Operation
-		counter   int
+		counter   uint64
 	)
 
 	log.Printf("Scheduling %v operations\n", proc)
 
 	counter = 0
 	for filePath = range filePathChan {
-		operation = &Operation{proc, counter, filePath}
+		operation = &Operation{proc, int(counter), filePath}
 		counter++
 
 		worker = <-master.idleWorkerChan
 		wg.Add(1)
-		go master.runOperation(worker, operation, &wg)
+		go master.runOperation(worker, operation, &wg, 0)
+	}
+
+	wg.Wait()
+
+	for failedOp := range master.failedOpsChan {
+		worker = <-master.idleWorkerChan
+		wg.Add(1)
+		go master.runOperation(worker, failedOp, &wg, counter)
 	}
 
 	wg.Wait()
 
 	log.Printf("%vx %v operations completed\n", counter, proc)
-	return counter
+	return int(counter)
 }
 
 // runOperation start a single operation on a RemoteWorker and wait for it to return or fail.
-func (master *Master) runOperation(remoteWorker *RemoteWorker, operation *Operation, wg *sync.WaitGroup) {
+func (master *Master) runOperation(remoteWorker *RemoteWorker, operation *Operation, wg *sync.WaitGroup, totalOps uint64) {
 	//////////////////////////////////
 	// YOU WANT TO MODIFY THIS CODE //
 	//////////////////////////////////
@@ -53,13 +62,18 @@ func (master *Master) runOperation(remoteWorker *RemoteWorker, operation *Operat
 
 	args = &RunArgs{operation.id, operation.filePath}
 	err = remoteWorker.callRemoteWorker(operation.proc, args, new(struct{}))
-
 	if err != nil {
 		log.Printf("Operation %v '%v' Failed. Error: %v\n", operation.proc, operation.id, err)
 		wg.Done()
 		master.failedWorkerChan <- remoteWorker
+		master.failedOpsChan <- operation
 	} else {
 		wg.Done()
 		master.idleWorkerChan <- remoteWorker
+		atomic.AddUint64(&master.counterSucceededOps, 1)
+		counterSucceeded := atomic.LoadUint64(&master.counterSucceededOps)
+		if totalOps != 0 && counterSucceeded == totalOps {
+			close(master.failedOpsChan)
+		}
 	}
 }
