@@ -21,6 +21,8 @@ func (master *Master) schedule(task *Task, proc string, filePathChan chan string
 		counter   uint64
 	)
 
+	master.counterSucceededOps = 0
+
 	log.Printf("Scheduling %v operations\n", proc)
 
 	counter = 0
@@ -35,6 +37,10 @@ func (master *Master) schedule(task *Task, proc string, filePathChan chan string
 
 	wg.Wait()
 
+	if master.counterSucceededOps == counter {
+		close(master.failedOpsChan)
+	}
+
 	for failedOp := range master.failedOpsChan {
 		worker = <-master.idleWorkerChan
 		wg.Add(1)
@@ -44,6 +50,7 @@ func (master *Master) schedule(task *Task, proc string, filePathChan chan string
 	wg.Wait()
 
 	log.Printf("%vx %v operations completed\n", counter, proc)
+	master.failedOpsChan = make(chan *Operation)
 	return int(counter)
 }
 
